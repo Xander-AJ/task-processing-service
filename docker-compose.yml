@@ -15,6 +15,17 @@ services:
       timeout: 3s
       retries: 10
 
+  # One-shot migration step. api and worker both wait for this to finish so
+  # neither starts against an empty schema, and migrations run exactly once.
+  migrate:
+    build: .
+    environment:
+      DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/tasks
+    depends_on:
+      db:
+        condition: service_healthy
+    command: alembic upgrade head
+
   api:
     build: .
     environment:
@@ -22,10 +33,11 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "8000:8000"
-    # Run migrations on boot, then start the API.
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
   worker:
     build: .
@@ -35,6 +47,8 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     command: python -m app.worker
 
 volumes:
