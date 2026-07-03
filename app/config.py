@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     retry_backoff_factor: float = 2.0
     retry_backoff_cap_seconds: float = 300.0
 
+    # Max tasks a single company contributes to one claim batch before fairness
+    # ordering. Bounds the per-company LATERAL subquery's work in claim_tasks().
+    per_company_claim_cap: int = 10
+
     # Port the worker exposes its own Prometheus metrics on (each replica is its
     # own scrape target).
     worker_metrics_port: int = 9100
