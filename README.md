@@ -17,9 +17,13 @@ pass on demand with `POST /workers/process`.
 
 ## Local dev (without docker for the app)
 
+    pip install -e ".[dev]"       # runtime + dev deps (pytest, ruff, mypy)
     docker compose up db          # just the database
     alembic upgrade head
     uvicorn app.main:app --reload
+
+Dependencies and tooling config live in `pyproject.toml`. Lint and type-check with
+`ruff check .` and `mypy`.
 
 ## Tests
 

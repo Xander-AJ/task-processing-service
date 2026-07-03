@@ -1,7 +1,7 @@
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from prometheus_client import REGISTRY
 
@@ -80,7 +80,7 @@ def test_failed_task_waits_before_reclaim(db):
     task = db.get(Task, task_id)
     assert task.status == TaskStatus.pending
     assert task.retry_count == 1
-    assert task.run_after > datetime.now(timezone.utc)
+    assert task.run_after > datetime.now(UTC)
 
     # A second pass shouldn't be able to claim it yet.
     result = worker_service.process_available_tasks(db, rng=lambda: 0.0)
@@ -101,7 +101,7 @@ def test_compute_backoff_bounds():
 
 def test_stale_lock_recovery(db):
     task_id = _create(db)
-    stale = datetime.now(timezone.utc) - timedelta(minutes=10)
+    stale = datetime.now(UTC) - timedelta(minutes=10)
     task = db.get(Task, task_id)
     task.status = TaskStatus.processing
     task.locked_by = "dead-worker"
@@ -146,7 +146,7 @@ def test_no_duplicate_concurrent_processing(TestSession):
 
 
 def test_fair_claim_across_companies(db):
-    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    base = datetime.now(UTC) - timedelta(hours=1)
     company_a, company_b, company_c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
 
     # Company A floods with 5 of the oldest tasks; B and C have 2 each, newer.
@@ -165,7 +165,7 @@ def test_fair_claim_across_companies(db):
 
 
 def test_fair_claim_does_not_starve_quiet_tenant(db):
-    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    base = datetime.now(UTC) - timedelta(hours=1)
     company_a, company_b = uuid.uuid4(), uuid.uuid4()
 
     # A has 10 older tasks; B has a single newer one. Pure FIFO would rank B 11th.
@@ -182,7 +182,7 @@ def test_fair_claim_does_not_starve_quiet_tenant(db):
 def test_concurrent_claim_no_duplicates(TestSession):
     # 8 pending tasks across 4 companies, committed so every connection sees them.
     setup = TestSession()
-    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    base = datetime.now(UTC) - timedelta(hours=1)
     companies = [uuid.uuid4() for _ in range(4)]
     for c in companies:
         for i in range(2):
@@ -206,7 +206,7 @@ def test_concurrent_claim_no_duplicates(TestSession):
 
 
 def test_release_tasks_returns_them_to_pending(db):
-    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    base = datetime.now(UTC) - timedelta(hours=1)
     company = uuid.uuid4()
     for i in range(2):
         _insert_pending(db, company, base + timedelta(seconds=i))
@@ -232,7 +232,7 @@ def test_release_tasks_returns_them_to_pending(db):
 
 
 def test_release_increments_released_counter(db):
-    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    base = datetime.now(UTC) - timedelta(hours=1)
     company = uuid.uuid4()
     for i in range(2):
         _insert_pending(db, company, base + timedelta(seconds=i))
@@ -249,9 +249,11 @@ def test_release_increments_released_counter(db):
 
 
 def test_shutdown_releases_unstarted_tasks(db):
-    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    base = datetime.now(UTC) - timedelta(hours=1)
     company = uuid.uuid4()
-    task_ids = [_insert_pending(db, company, base + timedelta(seconds=i)) for i in range(3)]
+    task_ids = [
+        _insert_pending(db, company, base + timedelta(seconds=i)) for i in range(3)
+    ]
 
     stop = threading.Event()
     stop.set()  # already stopping before the first task runs

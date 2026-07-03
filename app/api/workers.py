@@ -8,5 +8,5 @@ router = APIRouter(prefix="/workers", tags=["workers"])
 
 
 @router.post("/process")
-def process(db: Session = Depends(get_db)):
+def process(db: Session = Depends(get_db)) -> dict:
     return worker_service.process_available_tasks(db)

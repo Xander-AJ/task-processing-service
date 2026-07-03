@@ -7,8 +7,8 @@ class JsonFormatter(logging.Formatter):
     logging's extra={...} is merged into the output so we get structured logs
     without pulling in a logging library."""
 
-    def format(self, record):
-        out = {
+    def format(self, record: logging.LogRecord) -> str:
+        out: dict[str, object] = {
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
@@ -24,7 +24,7 @@ class JsonFormatter(logging.Formatter):
 _RESERVED = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__)
 
 
-def setup_logging():
+def setup_logging() -> None:
     handler = logging.StreamHandler()
     handler.setFormatter(JsonFormatter())
     root = logging.getLogger()

@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "task-processing-service"
+version = "0.1.0"
+description = "Multi-tenant task processing API with a claim/process worker."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi==0.115.6",
+    "uvicorn[standard]==0.34.0",
+    "sqlalchemy==2.0.36",
+    "psycopg2-binary==2.9.10",
+    "alembic==1.14.0",
+    "pydantic-settings==2.7.1",
+    "prometheus-client==0.23.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.3.4",
+    "httpx==0.28.1",
+    "ruff==0.15.15",
+    "mypy==2.1.0",
+]
+
+[tool.setuptools]
+packages = ["app"]
+
+[tool.ruff]
+line-length = 90
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/F: pycodestyle + pyflakes (the existing baseline). I: import sorting.
+# UP: pyupgrade. B: flake8-bugbear.
+select = ["E", "F", "I", "UP", "B"]
+# UP042 would rewrite `class TaskStatus(str, enum.Enum)` to StrEnum, which changes
+# `str(TaskStatus.x)` from "TaskStatus.x" to "x" — a behavioural change we don't
+# want here. Kept off deliberately.
+ignore = ["UP042"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's dependency-injection defaults are the framework's intended API, not
+# the mutable-default bug B008 targets.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.Header",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Migrations are immutable historical records: don't churn generated `Union[...]`
+# annotations (UP) or long generated lines (E501) in them.
+"alembic/**" = ["UP", "E501"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["app"]
+warn_unused_ignores = true
+disallow_untyped_defs = true
+no_implicit_optional = true

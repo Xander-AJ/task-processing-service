@@ -20,7 +20,7 @@ def create_task(
         default=None, alias="Idempotency-Key", max_length=128
     ),
     db: Session = Depends(get_db),
-):
+) -> TaskResponse:
     task, created = task_service.create_task(
         db, company_id, body.type, body.payload, idempotency_key
     )
@@ -34,7 +34,7 @@ def get_task(
     company_id: uuid.UUID,
     task_id: uuid.UUID,
     db: Session = Depends(get_db),
-):
+) -> TaskResponse:
     task = task_service.get_task(db, company_id, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
@@ -48,7 +48,7 @@ def list_tasks(
     limit: int = Query(default=50, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
-):
+) -> TaskList:
     tasks, total = task_service.list_tasks(db, company_id, status, limit, offset)
     return TaskList(
         tasks=[TaskResponse.from_task(t) for t in tasks],

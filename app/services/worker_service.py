@@ -3,7 +3,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
@@ -47,7 +47,7 @@ def claim_tasks(db: Session, batch_size: int = 10) -> list[Task]:
     work. SKIP LOCKED lets concurrent workers walk past rows another worker has
     already locked, so the same task is never claimed twice.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     stale_before = now - STALE
 
     # Round-robin fairness across companies. A naive `ORDER BY created_at` claims
@@ -142,7 +142,7 @@ def process_task(
     source used only for retry backoff jitter so the two are independently
     controllable in tests.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with task_processing_duration_seconds.time():
         try:
             if task.task_type == "send_email":
@@ -165,7 +165,7 @@ def process_task(
 
         except Exception as err:
             db.rollback()
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if task.retry_count < task.max_retries:
                 task.status = TaskStatus.pending
                 task.retry_count += 1
@@ -215,7 +215,7 @@ def release_tasks(db: Session, tasks: list[Task]) -> None:
     """
     if not tasks:
         return
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for task in tasks:
         task.status = TaskStatus.pending
         task.locked_at = None
