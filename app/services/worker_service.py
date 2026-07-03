@@ -1,6 +1,7 @@
 import logging
 import random
 import time
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import or_, select
@@ -12,6 +13,22 @@ from app.models import Task, TaskStatus
 log = logging.getLogger("tasks.worker")
 
 STALE = timedelta(seconds=settings.lock_timeout_seconds)
+
+
+def compute_backoff_seconds(
+    retry_count: int, *, rng: Callable[[], float] = random.random
+) -> float:
+    """Full-jitter exponential backoff: random(0, min(cap, base * factor**retry_count)).
+
+    The uncapped delay grows exponentially per attempt; the cap bounds it and the
+    jitter (a uniform draw in [0, delay)) spreads retries out to avoid thundering
+    herds. ``rng`` returns a value in [0, 1) and is injectable for tests.
+    """
+    ceiling = min(
+        settings.retry_backoff_cap_seconds,
+        settings.retry_backoff_base_seconds * settings.retry_backoff_factor**retry_count,
+    )
+    return rng() * ceiling
 
 
 def claim_tasks(db: Session, batch_size: int = 10) -> list[Task]:
@@ -27,9 +44,12 @@ def claim_tasks(db: Session, batch_size: int = 10) -> list[Task]:
         select(Task)
         .where(
             or_(
-                Task.status == TaskStatus.pending,
+                # A pending task is only claimable once its backoff gate has
+                # elapsed; failed retries push run_after into the future.
+                (Task.status == TaskStatus.pending) & (Task.run_after <= now),
                 # stale recovery: a task stuck in processing past the lock window
-                # belonged to a worker that died; take it back.
+                # belonged to a worker that died; take it back regardless of
+                # run_after.
                 (Task.status == TaskStatus.processing) & (Task.locked_at < now - STALE),
             )
         )
@@ -59,9 +79,18 @@ def claim_tasks(db: Session, batch_size: int = 10) -> list[Task]:
     return rows
 
 
-def process_task(db: Session, task: Task, rng=random.random) -> str:
+def process_task(
+    db: Session,
+    task: Task,
+    rng: Callable[[], float] = random.random,
+    backoff_rng: Callable[[], float] = random.random,
+) -> str:
     """Run one task's work, then record the outcome in its own short transaction.
     Called after claim_tasks committed, so no row lock is held during the sleep.
+
+    ``rng`` drives the simulated-failure coin flip; ``backoff_rng`` is a separate
+    source used only for retry backoff jitter so the two are independently
+    controllable in tests.
     """
     now = datetime.now(timezone.utc)
     try:
@@ -91,6 +120,11 @@ def process_task(db: Session, task: Task, rng=random.random) -> str:
             task.last_error = str(err)
             task.locked_at = None
             task.locked_by = None
+            # Gate re-claim behind exponential backoff; use the post-increment
+            # retry_count so the delay grows with each attempt.
+            task.run_after = now + timedelta(
+                seconds=compute_backoff_seconds(task.retry_count, rng=backoff_rng)
+            )
             task.updated_at = now
             db.commit()
             log.info(
@@ -116,11 +150,16 @@ def process_task(db: Session, task: Task, rng=random.random) -> str:
         return "failed"
 
 
-def process_available_tasks(db: Session, batch_size: int = 10, rng=random.random) -> dict:
+def process_available_tasks(
+    db: Session,
+    batch_size: int = 10,
+    rng: Callable[[], float] = random.random,
+    backoff_rng: Callable[[], float] = random.random,
+) -> dict:
     claimed = claim_tasks(db, batch_size)
     results = []
     for task in claimed:
-        status = process_task(db, task, rng)
+        status = process_task(db, task, rng, backoff_rng)
         results.append(
             {"taskId": str(task.id), "status": status, "error": task.last_error}
         )

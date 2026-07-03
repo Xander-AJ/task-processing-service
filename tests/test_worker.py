@@ -2,6 +2,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
+from app.config import settings
 from app.models import Task, TaskStatus
 from app.services import task_service, worker_service
 
@@ -28,18 +29,49 @@ def test_worker_retry_behavior(db):
     task_id = _create(db)
 
     for expected in (1, 2, 3):
-        worker_service.process_available_tasks(db, rng=lambda: 0.0)
+        # backoff_rng=0.0 => zero delay, so the task stays immediately eligible.
+        worker_service.process_available_tasks(
+            db, rng=lambda: 0.0, backoff_rng=lambda: 0.0
+        )
         db.expire_all()
         task = db.get(Task, task_id)
         assert task.retry_count == expected
         assert task.status == TaskStatus.pending
 
     # fourth failure exhausts retries
-    worker_service.process_available_tasks(db, rng=lambda: 0.0)
+    worker_service.process_available_tasks(db, rng=lambda: 0.0, backoff_rng=lambda: 0.0)
     db.expire_all()
     task = db.get(Task, task_id)
     assert task.status == TaskStatus.failed
     assert task.last_error
+
+
+def test_failed_task_waits_before_reclaim(db):
+    task_id = _create(db)
+
+    # Force a failure with max backoff delay.
+    worker_service.process_available_tasks(db, rng=lambda: 0.0, backoff_rng=lambda: 1.0)
+    db.expire_all()
+    task = db.get(Task, task_id)
+    assert task.status == TaskStatus.pending
+    assert task.retry_count == 1
+    assert task.run_after > datetime.now(timezone.utc)
+
+    # A second pass shouldn't be able to claim it yet.
+    result = worker_service.process_available_tasks(db, rng=lambda: 0.0)
+    assert result["processed"] == 0
+
+
+def test_compute_backoff_bounds():
+    base = settings.retry_backoff_base_seconds
+    factor = settings.retry_backoff_factor
+    cap = settings.retry_backoff_cap_seconds
+
+    for n in (0, 1, 2, 10):
+        assert worker_service.compute_backoff_seconds(n, rng=lambda: 1.0) == min(
+            cap, base * factor**n
+        )
+    assert worker_service.compute_backoff_seconds(3, rng=lambda: 0.0) == 0.0
 
 
 def test_stale_lock_recovery(db):

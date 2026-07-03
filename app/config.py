@@ -17,5 +17,10 @@ class Settings(BaseSettings):
     max_retries: int = 3
     lock_timeout_seconds: int = 300
 
+    # Full-jitter exponential backoff bounds for failed-task retries.
+    retry_backoff_base_seconds: float = 2.0
+    retry_backoff_factor: float = 2.0
+    retry_backoff_cap_seconds: float = 300.0
+
 
 settings = Settings()

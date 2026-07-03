@@ -63,6 +63,12 @@ class Task(Base):
     )
     locked_by: Mapped[str | None] = mapped_column(String, default=None)
 
+    # When a pending task becomes eligible to claim. Failed tasks are pushed
+    # into the future by backoff; new tasks default to now().
+    run_after: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -65,6 +65,9 @@ Trigger a processing pass:
   a dead worker can't strand a task forever.
 - A task is retried up to `max_retries` (default 3), then marked `failed` with its
   last error recorded.
+- Failed tasks retry with full-jitter exponential backoff (base 2s, ×2 per attempt,
+  capped at 5min) via a `run_after` gate, so a poison task can't burn its retries in
+  seconds. Stale-lock recovery is separate and unconditional.
 
 ## Bonus features
 
