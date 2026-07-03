@@ -53,6 +53,11 @@ tasks_processed_total = Counter(
     "Total tasks processed, by terminal outcome.",
     ["outcome"],  # one of: completed, failed, retried
 )
+tasks_released_total = Counter(
+    "tasks_released_total",
+    "Tasks returned to pending without completing "
+    "(e.g. released on graceful shutdown).",
+)
 task_processing_duration_seconds = Histogram(
     "task_processing_duration_seconds",
     "Wall-clock time spent processing a single task, in seconds.",

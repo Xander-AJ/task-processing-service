@@ -3,6 +3,8 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
+from prometheus_client import REGISTRY
+
 from app.config import settings
 from app.models import Task, TaskStatus
 from app.services import task_service, worker_service
@@ -227,6 +229,23 @@ def test_release_tasks_returns_them_to_pending(db):
         assert task.locked_by is None
         assert task.retry_count == retry_count
         assert task.run_after == run_after
+
+
+def test_release_increments_released_counter(db):
+    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    company = uuid.uuid4()
+    for i in range(2):
+        _insert_pending(db, company, base + timedelta(seconds=i))
+
+    # Read deltas, not absolutes: the default REGISTRY is process-global and
+    # shared with every other test.
+    before = REGISTRY.get_sample_value("tasks_released_total") or 0.0
+    claimed = worker_service.claim_tasks(db, batch_size=2)
+    assert len(claimed) == 2
+    worker_service.release_tasks(db, claimed)
+    after = REGISTRY.get_sample_value("tasks_released_total") or 0.0
+
+    assert after - before == len(claimed)
 
 
 def test_shutdown_releases_unstarted_tasks(db):

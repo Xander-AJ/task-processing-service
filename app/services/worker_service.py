@@ -15,6 +15,7 @@ from app.metrics import (
     task_processing_duration_seconds,
     tasks_claimed_total,
     tasks_processed_total,
+    tasks_released_total,
 )
 from app.models import Task, TaskStatus
 
@@ -221,6 +222,7 @@ def release_tasks(db: Session, tasks: list[Task]) -> None:
         task.locked_by = None
         task.updated_at = now
     db.commit()
+    tasks_released_total.inc(len(tasks))
     for task in tasks:
         log.info(
             "task_released",
