@@ -8,6 +8,13 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.metrics import (
+    claim_batch_size,
+    claim_duration_seconds,
+    task_processing_duration_seconds,
+    tasks_claimed_total,
+    tasks_processed_total,
+)
 from app.models import Task, TaskStatus
 
 log = logging.getLogger("tasks.worker")
@@ -90,10 +97,11 @@ def claim_tasks(db: Session, batch_size: int = 10) -> list[Task]:
         LIMIT :batch_size
         """
     )
-    rows = db.scalars(
-        select(Task).from_statement(sql),
-        {"now": now, "stale_before": stale_before, "batch_size": batch_size},
-    ).all()
+    with claim_duration_seconds.time():
+        rows = db.scalars(
+            select(Task).from_statement(sql),
+            {"now": now, "stale_before": stale_before, "batch_size": batch_size},
+        ).all()
 
     for task in rows:
         task.status = TaskStatus.processing
@@ -102,6 +110,9 @@ def claim_tasks(db: Session, batch_size: int = 10) -> list[Task]:
         task.updated_at = now
 
     db.commit()
+
+    claim_batch_size.observe(len(rows))
+    tasks_claimed_total.inc(len(rows))
 
     for task in rows:
         log.info(
@@ -130,61 +141,65 @@ def process_task(
     controllable in tests.
     """
     now = datetime.now(timezone.utc)
-    try:
-        if task.task_type == "send_email":
-            time.sleep(0.5)
-            if rng() < 0.2:
-                raise RuntimeError("simulated send_email failure")
+    with task_processing_duration_seconds.time():
+        try:
+            if task.task_type == "send_email":
+                time.sleep(0.5)
+                if rng() < 0.2:
+                    raise RuntimeError("simulated send_email failure")
 
-        task.status = TaskStatus.completed
-        task.last_error = None
-        task.locked_at = None
-        task.locked_by = None
-        task.updated_at = now
-        db.commit()
-        log.info(
-            "task_completed",
-            extra={"event": "task_completed", "task_id": str(task.id)},
-        )
-        return "completed"
-
-    except Exception as err:
-        db.rollback()
-        now = datetime.now(timezone.utc)
-        if task.retry_count < task.max_retries:
-            task.status = TaskStatus.pending
-            task.retry_count += 1
-            task.last_error = str(err)
+            task.status = TaskStatus.completed
+            task.last_error = None
             task.locked_at = None
             task.locked_by = None
-            # Gate re-claim behind exponential backoff; use the post-increment
-            # retry_count so the delay grows with each attempt.
-            task.run_after = now + timedelta(
-                seconds=compute_backoff_seconds(task.retry_count, rng=backoff_rng)
-            )
             task.updated_at = now
             db.commit()
             log.info(
-                "task_retry_scheduled",
-                extra={
-                    "event": "task_retry_scheduled",
-                    "task_id": str(task.id),
-                    "retry_count": task.retry_count,
-                },
+                "task_completed",
+                extra={"event": "task_completed", "task_id": str(task.id)},
             )
-            return "pending"
+            tasks_processed_total.labels(outcome="completed").inc()
+            return "completed"
 
-        task.status = TaskStatus.failed
-        task.last_error = str(err)
-        task.locked_at = None
-        task.locked_by = None
-        task.updated_at = now
-        db.commit()
-        log.info(
-            "task_failed",
-            extra={"event": "task_failed", "task_id": str(task.id)},
-        )
-        return "failed"
+        except Exception as err:
+            db.rollback()
+            now = datetime.now(timezone.utc)
+            if task.retry_count < task.max_retries:
+                task.status = TaskStatus.pending
+                task.retry_count += 1
+                task.last_error = str(err)
+                task.locked_at = None
+                task.locked_by = None
+                # Gate re-claim behind exponential backoff; use the post-increment
+                # retry_count so the delay grows with each attempt.
+                task.run_after = now + timedelta(
+                    seconds=compute_backoff_seconds(task.retry_count, rng=backoff_rng)
+                )
+                task.updated_at = now
+                db.commit()
+                log.info(
+                    "task_retry_scheduled",
+                    extra={
+                        "event": "task_retry_scheduled",
+                        "task_id": str(task.id),
+                        "retry_count": task.retry_count,
+                    },
+                )
+                tasks_processed_total.labels(outcome="retried").inc()
+                return "pending"
+
+            task.status = TaskStatus.failed
+            task.last_error = str(err)
+            task.locked_at = None
+            task.locked_by = None
+            task.updated_at = now
+            db.commit()
+            log.info(
+                "task_failed",
+                extra={"event": "task_failed", "task_id": str(task.id)},
+            )
+            tasks_processed_total.labels(outcome="failed").inc()
+            return "failed"
 
 
 def process_available_tasks(
