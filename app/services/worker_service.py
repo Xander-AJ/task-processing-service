@@ -52,24 +52,30 @@ def claim_tasks(db: Session, batch_size: int = 10) -> list[Task]:
 
     # Round-robin fairness across companies. A naive `ORDER BY created_at` claims
     # the globally-oldest rows, so one tenant with a big backlog starves everyone
-    # else. Instead we rank each company's eligible tasks with ROW_NUMBER (rn=1 is
-    # that company's oldest) and order the batch by (rn, created_at): every
-    # company's oldest task is claimed before any company's second. `rn <=
-    # batch_size` caps how many rows a single flooder can contribute to the
-    # candidate pool.
+    # else. We still order the batch so every company's oldest eligible task is
+    # claimed before any company's second (rn, then created_at), but we build the
+    # candidate pool with a LATERAL top-K per company instead of a global window.
     #
-    # This is raw SQL because a window function combined with FOR UPDATE SKIP
-    # LOCKED can't be expressed cleanly through the ORM, and the locking
-    # semantics (lock only the tasks rows `t`, skip already-locked ones) read far
-    # more clearly written out. `from_statement` still returns session-attached
-    # ORM Task objects, so the mutation/commit/logging block below is unchanged.
+    # Why LATERAL and not ROW_NUMBER() over the whole table: the window form sorts
+    # every eligible row (tens/hundreds of thousands under a flooder) just to keep
+    # the first `per_company_cap` of each. Here `eligible_companies` is bounded by
+    # the number of companies, and the LATERAL fetches only the top `:per_company_cap`
+    # oldest rows per company — exactly the query the partial index
+    # ix_tasks_pending_run_after was built for — so the sort input is at most
+    # (companies x per_company_cap) rows, not the whole backlog.
+    #
+    # This is raw SQL because a window/LATERAL combined with FOR UPDATE SKIP LOCKED
+    # can't be expressed cleanly through the ORM, and the locking semantics (lock
+    # only the outer tasks alias `t`, skip already-locked ones) read far more
+    # clearly written out. `from_statement` still returns session-attached ORM Task
+    # objects, so the mutation/commit/logging block below is unchanged.
     #
     # Eligibility is identical to before: pending tasks past their run_after gate,
-    # plus stale processing tasks whose worker died. Stale tasks are ranked
-    # alongside pending ones rather than given a separate path.
+    # plus stale processing tasks whose worker died (the stale branch is
+    # unconditional — it never filters on run_after).
     #
     # The eligibility predicate is repeated on the outer `t` (not just in the
-    # `ranked` CTE) on purpose. `ranked` reads tasks without a lock, so two
+    # candidate CTEs) on purpose. Those CTEs read tasks without a lock, so two
     # workers can build overlapping candidate sets from the same snapshot. Under
     # READ COMMITTED, when `FOR UPDATE` meets a row a concurrent worker already
     # claimed and committed, Postgres re-fetches the latest version and re-checks
@@ -78,20 +84,30 @@ def claim_tasks(db: Session, batch_size: int = 10) -> list[Task]:
     # hand the freed row to a second worker and claim it twice.
     sql = text(
         """
-        WITH ranked AS (
-            SELECT id,
-                   ROW_NUMBER() OVER (PARTITION BY company_id ORDER BY created_at) AS rn,
-                   created_at
+        WITH eligible_companies AS (
+            SELECT DISTINCT company_id
             FROM tasks
             WHERE (status = 'pending'    AND run_after <= :now)
                OR (status = 'processing' AND locked_at < :stale_before)
         ),
-        candidates AS (
-            SELECT id, rn, created_at FROM ranked WHERE rn <= :batch_size
+        per_company_top AS (
+            SELECT ec.company_id, top.id, top.created_at,
+                   ROW_NUMBER() OVER (PARTITION BY ec.company_id
+                                      ORDER BY top.created_at) AS rn
+            FROM eligible_companies ec
+            CROSS JOIN LATERAL (
+                SELECT id, created_at
+                FROM tasks
+                WHERE company_id = ec.company_id
+                  AND ((status = 'pending'    AND run_after <= :now)
+                    OR (status = 'processing' AND locked_at < :stale_before))
+                ORDER BY created_at
+                LIMIT :per_company_cap
+            ) top
         )
         SELECT t.*
         FROM tasks t
-        JOIN candidates c ON c.id = t.id
+        JOIN per_company_top c ON c.id = t.id
         WHERE (t.status = 'pending'    AND t.run_after <= :now)
            OR (t.status = 'processing' AND t.locked_at < :stale_before)
         ORDER BY c.rn, c.created_at
@@ -102,7 +118,12 @@ def claim_tasks(db: Session, batch_size: int = 10) -> list[Task]:
     with claim_duration_seconds.time():
         rows = db.scalars(
             select(Task).from_statement(sql),
-            {"now": now, "stale_before": stale_before, "batch_size": batch_size},
+            {
+                "now": now,
+                "stale_before": stale_before,
+                "per_company_cap": settings.per_company_claim_cap,
+                "batch_size": batch_size,
+            },
         ).all()
 
     for task in rows:

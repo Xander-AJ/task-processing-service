@@ -74,9 +74,12 @@ Trigger a processing pass:
 - Failed tasks retry with full-jitter exponential backoff (base 2s, ×2 per attempt,
   capped at 5min) via a `run_after` gate, so a poison task can't burn its retries in
   seconds. Stale-lock recovery is separate and unconditional.
-- Workers claim tasks round-robin across companies (ROW_NUMBER partitioned by
-  company_id), so a tenant with a large backlog can't starve others. A single
-  CTE ranks and locks in one statement via FOR UPDATE SKIP LOCKED.
+- Workers claim tasks round-robin across companies, so a tenant with a large
+  backlog can't starve others. Candidates come from a LATERAL top-K per eligible
+  company (the query the `run_after` partial index was built for), then fairness
+  ordering + `FOR UPDATE SKIP LOCKED` in one statement. Sorting only
+  companies x cap rows instead of the whole backlog keeps claims flat as the
+  backlog grows.
 
 ## Bonus features
 
