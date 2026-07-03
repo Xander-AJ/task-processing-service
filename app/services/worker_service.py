@@ -4,7 +4,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -39,23 +39,60 @@ def claim_tasks(db: Session, batch_size: int = 10) -> list[Task]:
     already locked, so the same task is never claimed twice.
     """
     now = datetime.now(timezone.utc)
+    stale_before = now - STALE
 
-    rows = db.scalars(
-        select(Task)
-        .where(
-            or_(
-                # A pending task is only claimable once its backoff gate has
-                # elapsed; failed retries push run_after into the future.
-                (Task.status == TaskStatus.pending) & (Task.run_after <= now),
-                # stale recovery: a task stuck in processing past the lock window
-                # belonged to a worker that died; take it back regardless of
-                # run_after.
-                (Task.status == TaskStatus.processing) & (Task.locked_at < now - STALE),
-            )
+    # Round-robin fairness across companies. A naive `ORDER BY created_at` claims
+    # the globally-oldest rows, so one tenant with a big backlog starves everyone
+    # else. Instead we rank each company's eligible tasks with ROW_NUMBER (rn=1 is
+    # that company's oldest) and order the batch by (rn, created_at): every
+    # company's oldest task is claimed before any company's second. `rn <=
+    # batch_size` caps how many rows a single flooder can contribute to the
+    # candidate pool.
+    #
+    # This is raw SQL because a window function combined with FOR UPDATE SKIP
+    # LOCKED can't be expressed cleanly through the ORM, and the locking
+    # semantics (lock only the tasks rows `t`, skip already-locked ones) read far
+    # more clearly written out. `from_statement` still returns session-attached
+    # ORM Task objects, so the mutation/commit/logging block below is unchanged.
+    #
+    # Eligibility is identical to before: pending tasks past their run_after gate,
+    # plus stale processing tasks whose worker died. Stale tasks are ranked
+    # alongside pending ones rather than given a separate path.
+    #
+    # The eligibility predicate is repeated on the outer `t` (not just in the
+    # `ranked` CTE) on purpose. `ranked` reads tasks without a lock, so two
+    # workers can build overlapping candidate sets from the same snapshot. Under
+    # READ COMMITTED, when `FOR UPDATE` meets a row a concurrent worker already
+    # claimed and committed, Postgres re-fetches the latest version and re-checks
+    # the outer WHERE (EvalPlanQual); the now-`processing`/fresh-locked row fails
+    # both branches and is dropped. Without this re-check, SKIP LOCKED alone would
+    # hand the freed row to a second worker and claim it twice.
+    sql = text(
+        """
+        WITH ranked AS (
+            SELECT id,
+                   ROW_NUMBER() OVER (PARTITION BY company_id ORDER BY created_at) AS rn,
+                   created_at
+            FROM tasks
+            WHERE (status = 'pending'    AND run_after <= :now)
+               OR (status = 'processing' AND locked_at < :stale_before)
+        ),
+        candidates AS (
+            SELECT id, rn, created_at FROM ranked WHERE rn <= :batch_size
         )
-        .order_by(Task.created_at.asc())
-        .limit(batch_size)
-        .with_for_update(skip_locked=True)
+        SELECT t.*
+        FROM tasks t
+        JOIN candidates c ON c.id = t.id
+        WHERE (t.status = 'pending'    AND t.run_after <= :now)
+           OR (t.status = 'processing' AND t.locked_at < :stale_before)
+        ORDER BY c.rn, c.created_at
+        FOR UPDATE OF t SKIP LOCKED
+        LIMIT :batch_size
+        """
+    )
+    rows = db.scalars(
+        select(Task).from_statement(sql),
+        {"now": now, "stale_before": stale_before, "batch_size": batch_size},
     ).all()
 
     for task in rows:

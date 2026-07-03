@@ -14,6 +14,28 @@ def _create(db):
     return task.id
 
 
+def _insert_pending(db, company_id, created_at):
+    """Insert a pending, immediately-eligible task with an explicit created_at.
+
+    Builds the Task directly (like test_stale_lock_recovery) so tests control
+    company_id and ordering; run_after is set in the past so the backoff gate
+    never hides the row.
+    """
+    task = Task(
+        id=uuid.uuid4(),
+        company_id=company_id,
+        task_type="send_email",
+        payload={"to": "a@b.com"},
+        status=TaskStatus.pending,
+        run_after=created_at - timedelta(minutes=1),
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    db.add(task)
+    db.commit()
+    return task.id
+
+
 def test_worker_success(db):
     task_id = _create(db)
     result = worker_service.process_available_tasks(db, rng=lambda: 0.99)
@@ -118,3 +140,63 @@ def test_no_duplicate_concurrent_processing(TestSession):
         assert task.status == TaskStatus.completed
     finally:
         check.close()
+
+
+def test_fair_claim_across_companies(db):
+    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    company_a, company_b, company_c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+
+    # Company A floods with 5 of the oldest tasks; B and C have 2 each, newer.
+    for i in range(5):
+        _insert_pending(db, company_a, base + timedelta(seconds=i))
+    for i in range(2):
+        _insert_pending(db, company_b, base + timedelta(minutes=1, seconds=i))
+    for i in range(2):
+        _insert_pending(db, company_c, base + timedelta(minutes=2, seconds=i))
+
+    claimed = worker_service.claim_tasks(db, batch_size=3)
+
+    assert len(claimed) == 3
+    companies = {task.company_id for task in claimed}
+    assert companies == {company_a, company_b, company_c}
+
+
+def test_fair_claim_does_not_starve_quiet_tenant(db):
+    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    company_a, company_b = uuid.uuid4(), uuid.uuid4()
+
+    # A has 10 older tasks; B has a single newer one. Pure FIFO would rank B 11th.
+    for i in range(10):
+        _insert_pending(db, company_a, base + timedelta(seconds=i))
+    b_task = _insert_pending(db, company_b, base + timedelta(minutes=5))
+
+    claimed = worker_service.claim_tasks(db, batch_size=3)
+
+    assert len(claimed) == 3
+    assert b_task in {task.id for task in claimed}
+
+
+def test_concurrent_claim_no_duplicates(TestSession):
+    # 8 pending tasks across 4 companies, committed so every connection sees them.
+    setup = TestSession()
+    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    companies = [uuid.uuid4() for _ in range(4)]
+    for c in companies:
+        for i in range(2):
+            _insert_pending(setup, c, base + timedelta(seconds=i))
+    setup.close()
+
+    def run_pass():
+        session = TestSession()
+        try:
+            return [task.id for task in worker_service.claim_tasks(session, batch_size=2)]
+        finally:
+            session.close()
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(run_pass) for _ in range(8)]
+        all_ids = [task_id for f in futures for task_id in f.result()]
+
+    # No task is ever claimed twice, and we never claim more than exist.
+    assert len(all_ids) == len(set(all_ids))
+    assert len(all_ids) <= 8
