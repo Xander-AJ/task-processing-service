@@ -1,6 +1,6 @@
 # Task Processing Service
 
-[![CI](https://github.com/Xander-AJ/senior-backend-engineer-assessment/actions/workflows/ci.yml/badge.svg)](https://github.com/Xander-AJ/senior-backend-engineer-assessment/actions/workflows/ci.yml)
+[![CI](https://github.com/Xander-AJ/task-processing-service/actions/workflows/ci.yml/badge.svg)](https://github.com/Xander-AJ/task-processing-service/actions/workflows/ci.yml)
 
 A multi-tenant REST API where companies create background tasks and workers process
 them without duplicate processing. Built with FastAPI and PostgreSQL.
