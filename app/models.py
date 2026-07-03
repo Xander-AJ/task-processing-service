@@ -2,7 +2,16 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Enum, Integer, String, UniqueConstraint, func
+from sqlalchemy import (
+    DateTime,
+    Enum,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -23,6 +32,14 @@ class Task(Base):
     __table_args__ = (
         UniqueConstraint(
             "company_id", "idempotency_key", name="uq_tasks_company_idempotency_key"
+        ),
+        # Partial index backing the worker's claim query (pending + eligible). It
+        # also lives in migration 0002; declared here so the model metadata matches
+        # the migrated schema and `alembic check` reports no drift.
+        Index(
+            "ix_tasks_pending_run_after",
+            "run_after",
+            postgresql_where=text("status = 'pending'"),
         ),
     )
 
