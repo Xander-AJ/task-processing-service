@@ -1,3 +1,4 @@
+import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -200,3 +201,50 @@ def test_concurrent_claim_no_duplicates(TestSession):
     # No task is ever claimed twice, and we never claim more than exist.
     assert len(all_ids) == len(set(all_ids))
     assert len(all_ids) <= 8
+
+
+def test_release_tasks_returns_them_to_pending(db):
+    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    company = uuid.uuid4()
+    for i in range(2):
+        _insert_pending(db, company, base + timedelta(seconds=i))
+
+    claimed = worker_service.claim_tasks(db, batch_size=2)
+    assert len(claimed) == 2
+    # Snapshot the fields release_tasks must leave untouched.
+    before = {t.id: (t.retry_count, t.run_after) for t in claimed}
+    for task in claimed:
+        assert task.status == TaskStatus.processing
+        assert task.locked_at is not None
+
+    worker_service.release_tasks(db, claimed)
+
+    db.expire_all()
+    for task_id, (retry_count, run_after) in before.items():
+        task = db.get(Task, task_id)
+        assert task.status == TaskStatus.pending
+        assert task.locked_at is None
+        assert task.locked_by is None
+        assert task.retry_count == retry_count
+        assert task.run_after == run_after
+
+
+def test_shutdown_releases_unstarted_tasks(db):
+    base = datetime.now(timezone.utc) - timedelta(hours=1)
+    company = uuid.uuid4()
+    task_ids = [_insert_pending(db, company, base + timedelta(seconds=i)) for i in range(3)]
+
+    stop = threading.Event()
+    stop.set()  # already stopping before the first task runs
+
+    result = worker_service.process_available_tasks(
+        db, batch_size=3, stop=stop, rng=lambda: 0.99
+    )
+
+    assert result["processed"] == 0
+    db.expire_all()
+    for task_id in task_ids:
+        task = db.get(Task, task_id)
+        assert task.status == TaskStatus.pending
+        assert task.locked_at is None
+        assert task.locked_by is None

@@ -44,6 +44,11 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://postgres:postgres@db:5432/tasks
       WORKER_ID: worker-1
+    # Each worker replica exposes its own metrics on 9100 and is a separate
+    # Prometheus scrape target: counters are per-process and summed by Prometheus
+    # across targets. (No Prometheus service here — instrumentation only.)
+    ports:
+      - "9100:9100"
     depends_on:
       db:
         condition: service_healthy

@@ -22,5 +22,9 @@ class Settings(BaseSettings):
     retry_backoff_factor: float = 2.0
     retry_backoff_cap_seconds: float = 300.0
 
+    # Port the worker exposes its own Prometheus metrics on (each replica is its
+    # own scrape target).
+    worker_metrics_port: int = 9100
+
 
 settings = Settings()

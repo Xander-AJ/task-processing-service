@@ -1,5 +1,6 @@
 import logging
 import random
+import threading
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
@@ -202,17 +203,57 @@ def process_task(
             return "failed"
 
 
+def release_tasks(db: Session, tasks: list[Task]) -> None:
+    """Hand claimed tasks back to the queue as healthy pending work.
+
+    Used on graceful shutdown to un-claim tasks a stopping worker won't run.
+    Resets the lock (status -> pending, locked_at/locked_by cleared) but leaves
+    retry_count and run_after untouched: these tasks never failed, so they must
+    not be penalised with a retry or a backoff delay. Committed in one
+    transaction. No-op for an empty list.
+    """
+    if not tasks:
+        return
+    now = datetime.now(timezone.utc)
+    for task in tasks:
+        task.status = TaskStatus.pending
+        task.locked_at = None
+        task.locked_by = None
+        task.updated_at = now
+    db.commit()
+    for task in tasks:
+        log.info(
+            "task_released",
+            extra={
+                "event": "task_released",
+                "task_id": str(task.id),
+                "worker_id": settings.worker_id,
+            },
+        )
+
+
 def process_available_tasks(
     db: Session,
     batch_size: int = 10,
     rng: Callable[[], float] = random.random,
     backoff_rng: Callable[[], float] = random.random,
+    stop: threading.Event | None = None,
 ) -> dict:
+    """Claim a batch and process it, honouring a graceful-shutdown signal.
+
+    When ``stop`` is set, no new task is started: all remaining un-started tasks
+    in the batch (including the one about to run) are released back to pending
+    and excluded from the results. A task already in progress is never
+    interrupted. With ``stop is None`` this behaves exactly as before.
+    """
     claimed = claim_tasks(db, batch_size)
     results = []
-    for task in claimed:
+    for i, task in enumerate(claimed):
+        if stop is not None and stop.is_set():
+            release_tasks(db, claimed[i:])
+            break
         status = process_task(db, task, rng, backoff_rng)
         results.append(
             {"taskId": str(task.id), "status": status, "error": task.last_error}
         )
-    return {"processed": len(claimed), "results": results}
+    return {"processed": len(results), "results": results}
