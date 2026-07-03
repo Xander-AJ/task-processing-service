@@ -91,7 +91,9 @@ def list_tasks(
     if status is not None:
         conditions.append(Task.status == status)
 
-    total = db.scalar(select(func.count()).select_from(Task).where(*conditions))
+    # count() always returns exactly one row, but db.scalar is typed Optional;
+    # coerce the None case away so the return matches tuple[list[Task], int].
+    total = db.scalar(select(func.count()).select_from(Task).where(*conditions)) or 0
     tasks = list(
         db.scalars(
             select(Task)

@@ -76,7 +76,7 @@ def claim_tasks(db: Session, batch_size: int = 10) -> list[Task]:
                 "worker_id": settings.worker_id,
             },
         )
-    return rows
+    return list(rows)
 
 
 def process_task(
