@@ -50,6 +50,11 @@ extend-immutable-calls = [
     "fastapi.Header",
 ]
 
+[tool.ruff.lint.isort]
+# The project's `alembic/` migrations dir makes isort guess `alembic` is a local
+# package; it's the third-party library.
+known-third-party = ["alembic"]
+
 [tool.ruff.lint.per-file-ignores]
 # Migrations are immutable historical records: don't churn generated `Union[...]`
 # annotations (UP) or long generated lines (E501) in them.

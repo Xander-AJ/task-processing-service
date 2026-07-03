@@ -1,14 +1,29 @@
 import uuid
+from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
+from alembic import command
+from alembic.config import Config
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, text
+from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 from app import models  # noqa: F401  (register models on Base.metadata)
 from app.config import settings
-from app.db import Base, get_db
+from app.db import get_db
 from app.main import app
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _alembic_config() -> Config:
+    """Alembic config pointed at the test database, resolved to absolute paths so
+    it works regardless of the pytest working directory."""
+    cfg = Config(str(_PROJECT_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_PROJECT_ROOT / "alembic"))
+    cfg.set_main_option("sqlalchemy.url", settings.test_database_url)
+    return cfg
 
 
 def _ensure_test_database():
@@ -27,12 +42,17 @@ def _ensure_test_database():
 
 
 @pytest.fixture(scope="session")
-def engine():
+def engine() -> Iterator[Engine]:
     _ensure_test_database()
     eng = create_engine(settings.test_database_url, pool_pre_ping=True)
-    # create_all over alembic here: faster for tests, and the migration is
-    # verified separately by `alembic check`.
-    Base.metadata.create_all(eng)
+    # Build the schema exactly as production does — `alembic upgrade head` — so the
+    # tests exercise the migrated schema, not a model-derived one that can drift
+    # from it. Wipe the schema first (dropping any leftover create_all state and
+    # the alembic_version marker) so the run is deterministic across repeats.
+    with eng.begin() as conn:
+        conn.execute(text("DROP SCHEMA public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+    command.upgrade(_alembic_config(), "head")
     yield eng
     eng.dispose()
 
